@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: prof
+spec:
+  type: LoadBalancer
+  selector:
+    statefulset.kubernetes.io/pod-name: postgresql-0
+  ports:
+  - name: postgresql
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql
+  namespace: prof
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: postgresql
+  ports:
+  - name: postgresql
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-config
+  namespace: prof
+data:
+  script.sh: |-
+    #!/bin/bash
+    echo -e $POD_NAME $NAMESPACE $HEADLESS_SERVICE
+    if [[ "$POD_NAME" == "postgresql-0" ]]; then
+      export POSTGRESQL_REPLICATION_MODE="master"
+      export POSTGRESQL_USERNAME=$PU
+      export POSTGRESQL_PASSWORD=$PP
+      export POSTGRESQL_DATABASE="gicdb"
+    else
+      export HOST="postgresql-0.$HEADLESS_SERVICE.$NAMESPACE.svc.cluster.local"
+      echo -e "Master Host: $HOST"
+      export POSTGRESQL_REPLICATION_MODE="slave"
+      export POSTGRESQL_MASTER_HOST=$HOST
+      export POSTGRESQL_MASTER_PORT_NUMBER="5432"
+      export POSTGRESQL_USERNAME=$PU
+      export POSTGRESQL_PASSWORD=$PP
+      export POSTGRESQL_DATABASE="gicdb"
+    fi
+    echo -e $POSTGRESQL_REPLICATION_MODE
+    exec /opt/bitnami/scripts/postgresql/entrypoint.sh /opt/bitnami/scripts/postgresql/run.sh
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql
+  namespace: prof
+spec:
+  serviceName: postgresql
+  selector:
+    matchLabels:
+      app: postgresql
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - name: postgresql
+          image: bitnami/postgresql:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+          - containerPort: 5432
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HEADLESS_SERVICE
+              value: "postgresql"
+
+            - name: POSTGRESQL_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: rep_user
+            - name: POSTGRESQL_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: rep_pass
+            - name: PU
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: username
+            - name: PP
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: password
+          command:
+            - /scripts/script.sh
+          securityContext:
+            runAsUser: 1001
+          volumeMounts:
+            - name: config
+              mountPath: /scripts
+            - name: postgresql-data
+              mountPath: /bitnami/postgresql
+      volumes:
+        - name: config
+          configMap:
+            name: postgresql-config
+            defaultMode: 0755
+            items:
+              - key: script.sh
+                path: script.sh
+  volumeClaimTemplates:
+    - metadata:
+        name: postgresql-data
+        namespace: prof
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 256Mi

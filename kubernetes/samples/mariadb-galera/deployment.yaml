@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-galera
+  namespace: prof
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: mariadb-galera
+  ports:
+  - name: mariadb
+    port: 3306
+    targetPort: 3306
+  - name: mariadb-galera
+    port: 4567
+    targetPort: 4567
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-galera-config
+  namespace: prof
+data:
+  script.sh: |-
+    #!/bin/bash
+    echo -e $POD_NAME
+    HOST="mariadb-galera-0.mariadb-galera.prof.svc.cluster.local"
+    if [[ "$POD_NAME" == "mariadb-galera-0" ]]; then
+      export MARIADB_GALERA_CLUSTER_BOOTSTRAP="yes"
+      export MARIADB_USER=$MU
+      export MARIADB_PASSWORD=$MP
+      export MARIADB_DATABASE="gicdb"
+      echo -e "GALERA_CLUSTER_BOOTSTRAP: True"
+    else
+      export MARIADB_GALERA_CLUSTER_ADDRESS="gcomm://$HOST:4567,0.0.0.0:4567"
+      echo -e "GALERA_CLUSTER_BOOTSTRAP: False"
+      echo -e $MARIADB_GALERA_CLUSTER_ADDRESS
+    fi
+    exec /opt/bitnami/scripts/mariadb-galera/entrypoint.sh /opt/bitnami/scripts/mariadb-galera/run.sh
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb-galera
+  namespace: prof
+spec:
+  serviceName: mariadb-galera
+  selector:
+    matchLabels:
+      app: mariadb-galera
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: mariadb-galera
+    spec:
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - name: mariadb-galera
+          image: bitnami/mariadb-galera:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+          - containerPort: 3306
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            
+            - name: MARIADB_GALERA_CLUSTER_NAME
+              value: "gicgalera"
+            
+            - name: MARIADB_GALERA_MARIABACKUP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: back_user
+            
+            - name: MARIADB_GALERA_MARIABACKUP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: back_pass
+
+            - name: MARIADB_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: rep_user
+            
+            - name: MARIADB_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: rep_pass
+            
+            - name: MU
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: username
+            
+            - name: MP
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: password
+            
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-galera-secret
+                  key: root_pass
+          command:
+            - /scripts/script.sh
+          securityContext:
+            runAsUser: 1001
+          volumeMounts:
+            - name: config
+              mountPath: /scripts
+            - name: mariadb-galera-data
+              mountPath: /bitnami/mariadb
+      volumes:
+        - name: config
+          configMap:
+            name: mariadb-galera-config
+            defaultMode: 0755
+            items:
+              - key: script.sh
+                path: script.sh
+  volumeClaimTemplates:
+    - metadata:
+        name: mariadb-galera-data
+        namespace: prof
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 1Gi
